@@ -1913,7 +1913,7 @@ void a6xx_gmu_suspend(struct adreno_device *adreno_dev)
 
 	dev_err(&gmu->pdev->dev, "Suspended GMU\n");
 
-	kgsl_pwrctrl_set_state(device, KGSL_STATE_NONE);
+	device->state = KGSL_STATE_NONE;
 }
 
 static int a6xx_gmu_dcvs_set(struct adreno_device *adreno_dev,
@@ -3044,7 +3044,7 @@ static int a6xx_gmu_power_off(struct adreno_device *adreno_dev)
 
 	a6xx_rdpm_cx_freq_update(gmu, 0);
 
-	kgsl_pwrctrl_set_state(device, KGSL_STATE_NONE);
+	device->state = KGSL_STATE_NONE;
 
 	return ret;
 
@@ -3404,7 +3404,7 @@ static void gmu_idle_check(struct work_struct *work)
 		goto done;
 	}
 
-	device->skip_inline_submit = true;
+	device->slumber = true;
 	spin_unlock(&device->submit_lock);
 
 	ret = a6xx_power_off(adreno_dev);

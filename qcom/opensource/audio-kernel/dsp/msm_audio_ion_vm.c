@@ -822,6 +822,9 @@ EXPORT_SYMBOL(msm_audio_ion_free_cma);
  * @abuff: audio buf pointer
  * @vma: virtual mem area
  *
+ * The caller holds mmap_lock for write and keeps the buffer alive for the
+ * lifetime of the mapping.
+ *
  * Returns 0 on success or error on failure
  */
 int msm_audio_ion_mmap(struct audio_buffer *abuff,
@@ -830,7 +833,7 @@ int msm_audio_ion_mmap(struct audio_buffer *abuff,
 	struct msm_audio_alloc_data *alloc_data = NULL;
 	struct sg_table *table;
 	unsigned long addr = vma->vm_start;
-	unsigned long offset = vma->vm_pgoff * PAGE_SIZE;
+	unsigned long offset;
 	struct scatterlist *sg;
 	unsigned int i;
 	struct page *page;
@@ -838,6 +841,7 @@ int msm_audio_ion_mmap(struct audio_buffer *abuff,
 	bool found = false;
 	struct device *cb_dev = msm_audio_ion_data.cb_dev;
 
+	/* The DMA attachment and its scatterlist are freed under this lock. */
 	mutex_lock(&(msm_audio_ion_data.list_mutex));
 	list_for_each_entry(alloc_data, &(msm_audio_ion_data.alloc_list),
 			    list) {
@@ -847,14 +851,24 @@ int msm_audio_ion_mmap(struct audio_buffer *abuff,
 			break;
 		}
 	}
-	mutex_unlock(&(msm_audio_ion_data.list_mutex));
 
 	if (!found) {
 		dev_err(cb_dev,
 			"%s: cannot find allocation, dma_buf %pK",
 			__func__, abuff->dma_buf);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto unlock;
 	}
+	if (vma->vm_pgoff > (alloc_data->len >> PAGE_SHIFT)) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+	offset = vma->vm_pgoff << PAGE_SHIFT;
+	if (vma->vm_end - addr > alloc_data->len - offset) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
 	/* uncached */
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 
@@ -866,7 +880,7 @@ int msm_audio_ion_mmap(struct audio_buffer *abuff,
 	page = sg_page(table->sgl);
 	if (page) {
 		pr_debug("%s: page is NOT null\n", __func__);
-		for_each_sg(table->sgl, sg, table->nents, i) {
+		for_each_sg(table->sgl, sg, table->orig_nents, i) {
 			unsigned long remainder = vma->vm_end - addr;
 			unsigned long len = sg->length;
 
@@ -886,17 +900,24 @@ int msm_audio_ion_mmap(struct audio_buffer *abuff,
 				(unsigned int)vma->vm_start,
 				(unsigned int)vma->vm_end,
 				(unsigned long)pgprot_val(vma->vm_page_prot));
-			remap_pfn_range(vma, addr, page_to_pfn(page), len,
-					vma->vm_page_prot);
+			ret = remap_pfn_range(vma, addr, page_to_pfn(page), len,
+					      vma->vm_page_prot);
+			if (ret)
+				goto unlock;
+
 			addr += len;
 			if (addr >= vma->vm_end)
-				return 0;
+				break;
 		}
+		if (addr != vma->vm_end)
+			ret = -EINVAL;
 	} else {
 		pr_debug("%s: page is NULL\n", __func__);
 		ret = -EINVAL;
 	}
 
+unlock:
+	mutex_unlock(&(msm_audio_ion_data.list_mutex));
 	return ret;
 }
 EXPORT_SYMBOL(msm_audio_ion_mmap);

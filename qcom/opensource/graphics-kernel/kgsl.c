@@ -2780,13 +2780,15 @@ long kgsl_ioctl_cmdstream_freememontimestamp_ctxtid(
 	return ret;
 }
 
-static int check_vma(unsigned long hostptr, u64 size)
+static bool check_vma(struct mm_struct *mm, unsigned long hostptr, u64 size)
 {
 	struct vm_area_struct *vma;
 	unsigned long cur = hostptr;
 
+	mmap_assert_locked(mm);
+
 	while (cur < (hostptr + size)) {
-		vma = find_vma(current->mm, cur);
+		vma = find_vma(mm, cur);
 		if (!vma)
 			return false;
 
@@ -2802,6 +2804,7 @@ static int check_vma(unsigned long hostptr, u64 size)
 
 static int memdesc_sg_virt(struct kgsl_memdesc *memdesc, unsigned long useraddr)
 {
+	struct mm_struct *mm = current->mm;
 	int ret = 0;
 	long npages = 0, i;
 	size_t sglen = (size_t) (memdesc->size / PAGE_SIZE);
@@ -2822,15 +2825,16 @@ static int memdesc_sg_virt(struct kgsl_memdesc *memdesc, unsigned long useraddr)
 		goto out;
 	}
 
-	mmap_read_lock(current->mm);
-	if (!check_vma(useraddr, memdesc->size)) {
-		mmap_read_unlock(current->mm);
+	/* Keep the VMA checks and the page pinning in the same mmap lock scope. */
+	mmap_read_lock(mm);
+	if (!check_vma(mm, useraddr, memdesc->size)) {
+		mmap_read_unlock(mm);
 		ret = -EFAULT;
 		goto out;
 	}
 
 	npages = get_user_pages(useraddr, sglen, write, pages, NULL);
-	mmap_read_unlock(current->mm);
+	mmap_read_unlock(mm);
 
 	ret = (npages < 0) ? (int)npages : 0;
 	if (ret)
@@ -4412,16 +4416,14 @@ kgsl_mmap_memstore(struct file *file, struct kgsl_device *device,
 	if (vma->vm_flags & VM_WRITE)
 		return -EPERM;
 
-	vma->vm_flags &= ~VM_MAYWRITE;
-
 	if (memdesc->size  != vma_size) {
 		dev_err(device->dev, "Cannot partially map the memstore\n");
 		return -EINVAL;
 	}
 
+	vm_flags_mod(vma, memdesc->ops->vmflags, VM_MAYWRITE);
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 	vma->vm_private_data = memdesc;
-	vma->vm_flags |= memdesc->ops->vmflags;
 	vma->vm_ops = &kgsl_memstore_vm_ops;
 	vma->vm_file = file;
 
@@ -4437,8 +4439,10 @@ static void kgsl_gpumem_vm_open(struct vm_area_struct *vma)
 {
 	struct kgsl_mem_entry *entry = vma->vm_private_data;
 
-	if (!kgsl_mem_entry_get(entry))
+	if (!kgsl_mem_entry_get(entry)) {
 		vma->vm_private_data = NULL;
+		return;
+	}
 
 	atomic_inc(&entry->map_count);
 }
@@ -4749,7 +4753,7 @@ static int kgsl_mmap(struct file *file, struct vm_area_struct *vma)
 	if (ret)
 		return ret;
 
-	vma->vm_flags |= entry->memdesc.ops->vmflags;
+	vm_flags_set(vma, entry->memdesc.ops->vmflags);
 
 	vma->vm_private_data = entry;
 

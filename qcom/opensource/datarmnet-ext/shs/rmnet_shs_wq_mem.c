@@ -15,6 +15,8 @@
 #include "rmnet_shs_modules.h"
 #include "rmnet_shs_common.h"
 #include "rmnet_shs_wq_mem.h"
+#include <linux/anon_inodes.h>
+#include <linux/file.h>
 #include <linux/proc_fs.h>
 #include <linux/refcount.h>
 MODULE_LICENSE("\x47\x50\x4c\x20\x76\x32");
@@ -36,240 +38,157 @@ struct DATARMNETa41d4c4a12 *DATARMNET22e796eff3;
 struct DATARMNETa41d4c4a12 *DATARMNET9b8000d2a7;
 struct DATARMNETa41d4c4a12 *DATARMNET835a28686c;
 struct DATARMNETa41d4c4a12 *DATARMNET67d31dc40a;
-static void DATARMNET6069bf201a(struct vm_area_struct *vma)
+
+struct rmnet_shs_open_file {
+	struct DATARMNETa41d4c4a12 *buffer;
+	/* Weak reference protected by the SHS lock. */
+	struct file *mapping_file;
+};
+
+/*
+ * Procfs can release an open file during entry removal. Read its private
+ * data under the same lock that clears it and pin the page before unlocking.
+ */
+static vm_fault_t rmnet_shs_mapping_fault(struct vm_fault *vmf)
 {
-	return;
-}
-static void DATARMNET0f6b7f3f93(struct vm_area_struct *vma)
-{
-	return;
-}
-static vm_fault_t DATARMNET9efe8a3d18(struct vm_fault *DATARMNETca901b4e1f)
-{
-	struct page *page = NULL;
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	struct file *proc_file = vmf->vma->vm_file->private_data;
+	struct rmnet_shs_open_file *open_file;
+	struct DATARMNETa41d4c4a12 *info;
+	struct page *page;
+
 	DATARMNET6bf538fa23();
-	if (DATARMNET410036d5ac) {
-		DATARMNET54338da2ff =
-			(struct DATARMNETa41d4c4a12 *)
-				DATARMNETca901b4e1f->vma->vm_private_data;
-		if (DATARMNET54338da2ff->data) {
-			page = virt_to_page(DATARMNET54338da2ff->data);
-			get_page(page);
-			DATARMNETca901b4e1f->page = page;
-		} else {
-			DATARMNETaea4c85748();
-			return VM_FAULT_SIGSEGV;
-		}
-	} else {
+	open_file = proc_file->private_data;
+	info = open_file ? open_file->buffer : NULL;
+	if (!info || !info->data) {
 		DATARMNETaea4c85748();
 		return VM_FAULT_SIGSEGV;
 	}
+
+	page = virt_to_page(info->data);
+	get_page(page);
+	vmf->page = page;
 	DATARMNETaea4c85748();
-	return (0xd2d + 202 - 0xdf7);
+	return 0;
 }
-static vm_fault_t DATARMNETd005aa7157(struct vm_fault *DATARMNETca901b4e1f)
+
+static const struct vm_operations_struct rmnet_shs_vm_ops = {
+	.fault = rmnet_shs_mapping_fault,
+};
+
+static int rmnet_shs_mapping_remap(struct file *file,
+				   struct vm_area_struct *vma)
 {
-	struct page *page = NULL;
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	/* Go through procfs so remapping checks for entry removal too. */
+	return call_mmap(file->private_data, vma);
+}
+
+static int rmnet_shs_mapping_release(struct inode *inode, struct file *file)
+{
+	struct file *proc_file = file->private_data;
+	struct rmnet_shs_open_file *open_file;
+
 	DATARMNET6bf538fa23();
-	if (DATARMNET19c47a9f3a) {
-		DATARMNET54338da2ff =
-			(struct DATARMNETa41d4c4a12 *)
-				DATARMNETca901b4e1f->vma->vm_private_data;
-		if (DATARMNET54338da2ff->data) {
-			page = virt_to_page(DATARMNET54338da2ff->data);
-			get_page(page);
-			DATARMNETca901b4e1f->page = page;
-		} else {
-			DATARMNETaea4c85748();
-			return VM_FAULT_SIGSEGV;
-		}
-	} else {
-		DATARMNETaea4c85748();
-		return VM_FAULT_SIGSEGV;
+	open_file = proc_file->private_data;
+	if (open_file && open_file->mapping_file == file)
+		open_file->mapping_file = NULL;
+	DATARMNETaea4c85748();
+
+	fput(proc_file);
+	return 0;
+}
+
+static const struct file_operations rmnet_shs_mapping_fops = {
+	.owner = THIS_MODULE,
+	.mmap = rmnet_shs_mapping_remap,
+	.release = rmnet_shs_mapping_release,
+};
+
+/*
+ * Take a reference to the live backing file, or install the caller's new
+ * file. The release callback removes the weak reference before the file
+ * can be freed, and get_file_rcu() prevents reviving a file being released.
+ */
+static struct file *
+rmnet_shs_get_mapping_file(struct rmnet_shs_open_file *open_file,
+			   struct file *new_file)
+{
+	struct file *mapping_file;
+
+	DATARMNET6bf538fa23();
+	mapping_file = open_file->mapping_file;
+	if (!mapping_file || !get_file_rcu(mapping_file)) {
+		mapping_file = new_file;
+		open_file->mapping_file = new_file;
 	}
 	DATARMNETaea4c85748();
-	return (0xd2d + 202 - 0xdf7);
+
+	return mapping_file;
 }
-static vm_fault_t DATARMNETb3a7180954(struct vm_fault *DATARMNETca901b4e1f)
+
+static int rmnet_shs_proc_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	struct page *page = NULL;
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	/* Procfs keeps the open state alive while this callback runs. */
+	struct rmnet_shs_open_file *open_file = file->private_data;
+	struct file *mapping_file;
+
+	/* Remapping through the anonymous file can bypass procfs's noexec. */
+	if (vma->vm_flags & VM_EXEC)
+		return -EPERM;
+
+	mapping_file = rmnet_shs_get_mapping_file(open_file, NULL);
+	if (!mapping_file) {
+		struct file *new_file;
+
+		/* Keep both the module and the proc file alive across unmap. */
+		new_file = anon_inode_getfile("[rmnet_shs]",
+					      &rmnet_shs_mapping_fops, file,
+					      file->f_flags);
+		if (IS_ERR(new_file))
+			return PTR_ERR(new_file);
+
+		get_file(file);
+		mapping_file = rmnet_shs_get_mapping_file(open_file, new_file);
+		if (mapping_file != new_file)
+			fput(new_file);
+	}
+
+	vm_flags_mod(vma, VM_DONTEXPAND | VM_DONTDUMP, VM_MAYEXEC);
+	vma->vm_ops = &rmnet_shs_vm_ops;
+	swap(vma->vm_file, mapping_file);
+	fput(mapping_file);
+	return 0;
+}
+
+static void rmnet_shs_release_buffer(struct file *file,
+				     struct DATARMNETa41d4c4a12 **shared)
+{
+	struct rmnet_shs_open_file *open_file;
+	struct DATARMNETa41d4c4a12 *info;
+
 	DATARMNET6bf538fa23();
-	if (DATARMNET22e796eff3) {
-		DATARMNET54338da2ff =
-			(struct DATARMNETa41d4c4a12 *)
-				DATARMNETca901b4e1f->vma->vm_private_data;
-		if (DATARMNET54338da2ff->data) {
-			page = virt_to_page(DATARMNET54338da2ff->data);
-			get_page(page);
-			DATARMNETca901b4e1f->page = page;
-		} else {
-			DATARMNETaea4c85748();
-			return VM_FAULT_SIGSEGV;
-		}
-	} else {
-		DATARMNETaea4c85748();
-		return VM_FAULT_SIGSEGV;
+	open_file = file->private_data;
+	file->private_data = NULL;
+	info = open_file ? open_file->buffer : NULL;
+	if (info && refcount_dec_and_test(&info->refcnt)) {
+		if (*shared == info)
+			*shared = NULL;
+		free_page((unsigned long)info->data);
+		kfree(info);
 	}
 	DATARMNETaea4c85748();
-	return (0xd2d + 202 - 0xdf7);
+	kfree(open_file);
 }
-static vm_fault_t DATARMNETe35719979c(struct vm_fault *DATARMNETca901b4e1f)
-{
-	struct page *page = NULL;
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
-	DATARMNET6bf538fa23();
-	if (DATARMNET9b8000d2a7) {
-		DATARMNET54338da2ff =
-			(struct DATARMNETa41d4c4a12 *)
-				DATARMNETca901b4e1f->vma->vm_private_data;
-		if (DATARMNET54338da2ff->data) {
-			page = virt_to_page(DATARMNET54338da2ff->data);
-			get_page(page);
-			DATARMNETca901b4e1f->page = page;
-		} else {
-			DATARMNETaea4c85748();
-			return VM_FAULT_SIGSEGV;
-		}
-	} else {
-		DATARMNETaea4c85748();
-		return VM_FAULT_SIGSEGV;
-	}
-	DATARMNETaea4c85748();
-	return (0xd2d + 202 - 0xdf7);
-}
-static vm_fault_t DATARMNET1ab1f570f2(struct vm_fault *DATARMNETca901b4e1f)
-{
-	struct page *page = NULL;
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
-	DATARMNET6bf538fa23();
-	if (DATARMNET835a28686c) {
-		DATARMNET54338da2ff =
-			(struct DATARMNETa41d4c4a12 *)
-				DATARMNETca901b4e1f->vma->vm_private_data;
-		if (DATARMNET54338da2ff->data) {
-			page = virt_to_page(DATARMNET54338da2ff->data);
-			get_page(page);
-			DATARMNETca901b4e1f->page = page;
-		} else {
-			DATARMNETaea4c85748();
-			return VM_FAULT_SIGSEGV;
-		}
-	} else {
-		DATARMNETaea4c85748();
-		return VM_FAULT_SIGSEGV;
-	}
-	DATARMNETaea4c85748();
-	return (0xd2d + 202 - 0xdf7);
-}
-static vm_fault_t DATARMNETe421c4e1db(struct vm_fault *DATARMNETca901b4e1f)
-{
-	struct page *page = NULL;
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
-	DATARMNET6bf538fa23();
-	if (DATARMNET67d31dc40a) {
-		DATARMNET54338da2ff =
-			(struct DATARMNETa41d4c4a12 *)
-				DATARMNETca901b4e1f->vma->vm_private_data;
-		if (DATARMNET54338da2ff->data) {
-			page = virt_to_page(DATARMNET54338da2ff->data);
-			get_page(page);
-			DATARMNETca901b4e1f->page = page;
-		} else {
-			DATARMNETaea4c85748();
-			return VM_FAULT_SIGSEGV;
-		}
-	} else {
-		DATARMNETaea4c85748();
-		return VM_FAULT_SIGSEGV;
-	}
-	DATARMNETaea4c85748();
-	return (0xd2d + 202 - 0xdf7);
-}
-static const struct vm_operations_struct DATARMNETfa4e968e7d = {
-	.close = DATARMNET0f6b7f3f93,
-	.open = DATARMNET6069bf201a,
-	.fault = DATARMNET9efe8a3d18,
-};
-static const struct vm_operations_struct DATARMNETe9c0626068 = {
-	.close = DATARMNET0f6b7f3f93,
-	.open = DATARMNET6069bf201a,
-	.fault = DATARMNETd005aa7157,
-};
-static const struct vm_operations_struct DATARMNET9a89317a86 = {
-	.close = DATARMNET0f6b7f3f93,
-	.open = DATARMNET6069bf201a,
-	.fault = DATARMNETb3a7180954,
-};
-static const struct vm_operations_struct DATARMNET5462c2ce60 = {
-	.close = DATARMNET0f6b7f3f93,
-	.open = DATARMNET6069bf201a,
-	.fault = DATARMNETe35719979c,
-};
-static const struct vm_operations_struct DATARMNET523167fa26 = {
-	.close = DATARMNET0f6b7f3f93,
-	.open = DATARMNET6069bf201a,
-	.fault = DATARMNET1ab1f570f2,
-};
-static const struct vm_operations_struct DATARMNET41944cc550 = {
-	.close = DATARMNET0f6b7f3f93,
-	.open = DATARMNET6069bf201a,
-	.fault = DATARMNETe421c4e1db,
-};
-static int DATARMNET54418f934d(struct file *DATARMNET3cc114dce0,
-			       struct vm_area_struct *vma)
-{
-	vma->vm_ops = &DATARMNETfa4e968e7d;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = DATARMNET3cc114dce0->private_data;
-	return (0xd2d + 202 - 0xdf7);
-}
-static int DATARMNETc55748448d(struct file *DATARMNET3cc114dce0,
-			       struct vm_area_struct *vma)
-{
-	vma->vm_ops = &DATARMNETe9c0626068;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = DATARMNET3cc114dce0->private_data;
-	return (0xd2d + 202 - 0xdf7);
-}
-static int DATARMNET43c6d751a2(struct file *DATARMNET3cc114dce0,
-			       struct vm_area_struct *vma)
-{
-	vma->vm_ops = &DATARMNET9a89317a86;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = DATARMNET3cc114dce0->private_data;
-	return (0xd2d + 202 - 0xdf7);
-}
-static int DATARMNET7cc042bdf3(struct file *DATARMNET3cc114dce0,
-			       struct vm_area_struct *vma)
-{
-	vma->vm_ops = &DATARMNET5462c2ce60;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = DATARMNET3cc114dce0->private_data;
-	return (0xd2d + 202 - 0xdf7);
-}
-static int DATARMNET150e284e90(struct file *DATARMNET3cc114dce0,
-			       struct vm_area_struct *vma)
-{
-	vma->vm_ops = &DATARMNET523167fa26;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = DATARMNET3cc114dce0->private_data;
-	return (0xd2d + 202 - 0xdf7);
-}
-static int DATARMNET444e2eb654(struct file *DATARMNET3cc114dce0,
-			       struct vm_area_struct *vma)
-{
-	vma->vm_ops = &DATARMNET41944cc550;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = DATARMNET3cc114dce0->private_data;
-	return (0xd2d + 202 - 0xdf7);
-}
+
 static int DATARMNET33a80d3bf7(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
 	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	struct rmnet_shs_open_file *open_file;
+
+	open_file = kzalloc(sizeof(*open_file), GFP_KERNEL);
+	if (!open_file)
+		return -ENOMEM;
+
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
@@ -296,7 +215,8 @@ static int DATARMNET33a80d3bf7(struct inode *inode,
 	} else {
 		refcount_inc(&DATARMNET410036d5ac->refcnt);
 	}
-	DATARMNET3cc114dce0->private_data = DATARMNET410036d5ac;
+	open_file->buffer = DATARMNET410036d5ac;
+	DATARMNET3cc114dce0->private_data = open_file;
 	DATARMNETaea4c85748();
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x2d\x20\x4f\x4b"
@@ -304,6 +224,7 @@ static int DATARMNET33a80d3bf7(struct inode *inode,
 	return (0xd2d + 202 - 0xdf7);
 DATARMNET1d7e728ddf:
 	DATARMNETaea4c85748();
+	kfree(open_file);
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x2d\x20\x46\x41\x49\x4c\x45\x44"
 	       "\n");
@@ -313,6 +234,12 @@ static int DATARMNET0935e3beb9(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
 	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	struct rmnet_shs_open_file *open_file;
+
+	open_file = kzalloc(sizeof(*open_file), GFP_KERNEL);
+	if (!open_file)
+		return -ENOMEM;
+
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x67\x5f\x66\x6c\x6f\x77\x73\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
@@ -339,11 +266,13 @@ static int DATARMNET0935e3beb9(struct inode *inode,
 	} else {
 		refcount_inc(&DATARMNET19c47a9f3a->refcnt);
 	}
-	DATARMNET3cc114dce0->private_data = DATARMNET19c47a9f3a;
+	open_file->buffer = DATARMNET19c47a9f3a;
+	DATARMNET3cc114dce0->private_data = open_file;
 	DATARMNETaea4c85748();
 	return (0xd2d + 202 - 0xdf7);
 DATARMNET1d7e728ddf:
 	DATARMNETaea4c85748();
+	kfree(open_file);
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x2d\x20\x46\x41\x49\x4c\x45\x44"
 	       "\n");
@@ -353,6 +282,12 @@ static int DATARMNETfbd34e70a2(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
 	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	struct rmnet_shs_open_file *open_file;
+
+	open_file = kzalloc(sizeof(*open_file), GFP_KERNEL);
+	if (!open_file)
+		return -ENOMEM;
+
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x73\x73\x5f\x66\x6c\x6f\x77\x73\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
@@ -379,11 +314,13 @@ static int DATARMNETfbd34e70a2(struct inode *inode,
 	} else {
 		refcount_inc(&DATARMNET22e796eff3->refcnt);
 	}
-	DATARMNET3cc114dce0->private_data = DATARMNET22e796eff3;
+	open_file->buffer = DATARMNET22e796eff3;
+	DATARMNET3cc114dce0->private_data = open_file;
 	DATARMNETaea4c85748();
 	return (0xd2d + 202 - 0xdf7);
 DATARMNET1d7e728ddf:
 	DATARMNETaea4c85748();
+	kfree(open_file);
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x2d\x20\x46\x41\x49\x4c\x45\x44"
 	       "\n");
@@ -393,6 +330,12 @@ static int DATARMNET57bcb932f3(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
 	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	struct rmnet_shs_open_file *open_file;
+
+	open_file = kzalloc(sizeof(*open_file), GFP_KERNEL);
+	if (!open_file)
+		return -ENOMEM;
+
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x66\x66\x6c\x6f\x77\x73\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
@@ -419,11 +362,13 @@ static int DATARMNET57bcb932f3(struct inode *inode,
 	} else {
 		refcount_inc(&DATARMNET9b8000d2a7->refcnt);
 	}
-	DATARMNET3cc114dce0->private_data = DATARMNET9b8000d2a7;
+	open_file->buffer = DATARMNET9b8000d2a7;
+	DATARMNET3cc114dce0->private_data = open_file;
 	DATARMNETaea4c85748();
 	return (0xd2d + 202 - 0xdf7);
 DATARMNET1d7e728ddf:
 	DATARMNETaea4c85748();
+	kfree(open_file);
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x2d\x20\x46\x41\x49\x4c\x45\x44"
 	       "\n");
@@ -433,6 +378,12 @@ static int DATARMNET601894f27b(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
 	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	struct rmnet_shs_open_file *open_file;
+
+	open_file = kzalloc(sizeof(*open_file), GFP_KERNEL);
+	if (!open_file)
+		return -ENOMEM;
+
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x6c\x6c\x5f\x66\x6c\x6f\x77\x73\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
@@ -459,11 +410,13 @@ static int DATARMNET601894f27b(struct inode *inode,
 	} else {
 		refcount_inc(&DATARMNET835a28686c->refcnt);
 	}
-	DATARMNET3cc114dce0->private_data = DATARMNET835a28686c;
+	open_file->buffer = DATARMNET835a28686c;
+	DATARMNET3cc114dce0->private_data = open_file;
 	DATARMNETaea4c85748();
 	return (0xd2d + 202 - 0xdf7);
 DATARMNET1d7e728ddf:
 	DATARMNETaea4c85748();
+	kfree(open_file);
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x2d\x20\x46\x41\x49\x4c\x45\x44"
 	       "\n");
@@ -473,6 +426,12 @@ static int DATARMNETb9d10d8cc0(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
 	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
+	struct rmnet_shs_open_file *open_file;
+
+	open_file = kzalloc(sizeof(*open_file), GFP_KERNEL);
+	if (!open_file)
+		return -ENOMEM;
+
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x6f\x70\x65\x6e\x20\x6e\x65\x74\x64\x65\x76\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
@@ -499,11 +458,13 @@ static int DATARMNETb9d10d8cc0(struct inode *inode,
 	} else {
 		refcount_inc(&DATARMNET67d31dc40a->refcnt);
 	}
-	DATARMNET3cc114dce0->private_data = DATARMNET67d31dc40a;
+	open_file->buffer = DATARMNET67d31dc40a;
+	DATARMNET3cc114dce0->private_data = open_file;
 	DATARMNETaea4c85748();
 	return (0xd2d + 202 - 0xdf7);
 DATARMNET1d7e728ddf:
 	DATARMNETaea4c85748();
+	kfree(open_file);
 	return -ENOMEM;
 }
 static ssize_t DATARMNETaf2aa1d70f(struct file *DATARMNET3cc114dce0,
@@ -521,178 +482,94 @@ static ssize_t DATARMNET4761dcd3fd(struct file *DATARMNET3cc114dce0,
 static int DATARMNETcfbc4f0c39(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x72\x65\x6c\x65\x61\x73\x65\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
-	DATARMNET6bf538fa23();
-	if (DATARMNET410036d5ac) {
-		DATARMNET54338da2ff = DATARMNET3cc114dce0->private_data;
-		if (refcount_read(&DATARMNET54338da2ff->refcnt) <=
-		    (0xd26 + 209 - 0xdf6)) {
-			free_page((unsigned long)DATARMNET54338da2ff->data);
-			kfree(DATARMNET54338da2ff);
-			DATARMNET410036d5ac = NULL;
-			DATARMNET3cc114dce0->private_data = NULL;
-		} else {
-			refcount_dec(&DATARMNET54338da2ff->refcnt);
-		}
-	}
-	DATARMNETaea4c85748();
+	rmnet_shs_release_buffer(DATARMNET3cc114dce0, &DATARMNET410036d5ac);
 	return (0xd2d + 202 - 0xdf7);
 }
 static int DATARMNET2a9f67714f(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x72\x65\x6c\x65\x61\x73\x65\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
-	DATARMNET6bf538fa23();
-	if (DATARMNET19c47a9f3a) {
-		DATARMNET54338da2ff = DATARMNET3cc114dce0->private_data;
-		if (refcount_read(&DATARMNET54338da2ff->refcnt) <=
-		    (0xd26 + 209 - 0xdf6)) {
-			free_page((unsigned long)DATARMNET54338da2ff->data);
-			kfree(DATARMNET54338da2ff);
-			DATARMNET19c47a9f3a = NULL;
-			DATARMNET3cc114dce0->private_data = NULL;
-		} else {
-			refcount_dec(&DATARMNET54338da2ff->refcnt);
-		}
-	}
-	DATARMNETaea4c85748();
+	rmnet_shs_release_buffer(DATARMNET3cc114dce0, &DATARMNET19c47a9f3a);
 	return (0xd2d + 202 - 0xdf7);
 }
 static int DATARMNET968bc5b80d(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x72\x65\x6c\x65\x61\x73\x65\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
-	DATARMNET6bf538fa23();
-	if (DATARMNET22e796eff3) {
-		DATARMNET54338da2ff = DATARMNET3cc114dce0->private_data;
-		if (refcount_read(&DATARMNET54338da2ff->refcnt) <=
-		    (0xd26 + 209 - 0xdf6)) {
-			free_page((unsigned long)DATARMNET54338da2ff->data);
-			kfree(DATARMNET54338da2ff);
-			DATARMNET22e796eff3 = NULL;
-			DATARMNET3cc114dce0->private_data = NULL;
-		} else {
-			refcount_dec(&DATARMNET54338da2ff->refcnt);
-		}
-	}
-	DATARMNETaea4c85748();
+	rmnet_shs_release_buffer(DATARMNET3cc114dce0, &DATARMNET22e796eff3);
 	return (0xd2d + 202 - 0xdf7);
 }
 static int DATARMNET59b415aded(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x72\x65\x6c\x65\x61\x73\x65\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
-	DATARMNET6bf538fa23();
-	if (DATARMNET9b8000d2a7) {
-		DATARMNET54338da2ff = DATARMNET3cc114dce0->private_data;
-		if (refcount_read(&DATARMNET54338da2ff->refcnt) <=
-		    (0xd26 + 209 - 0xdf6)) {
-			free_page((unsigned long)DATARMNET54338da2ff->data);
-			kfree(DATARMNET54338da2ff);
-			DATARMNET9b8000d2a7 = NULL;
-			DATARMNET3cc114dce0->private_data = NULL;
-		} else {
-			refcount_dec(&DATARMNET54338da2ff->refcnt);
-		}
-	}
-	DATARMNETaea4c85748();
+	rmnet_shs_release_buffer(DATARMNET3cc114dce0, &DATARMNET9b8000d2a7);
 	return (0xd2d + 202 - 0xdf7);
 }
 static int DATARMNET794d7587bd(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x72\x65\x6c\x65\x61\x73\x65\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
-	DATARMNET6bf538fa23();
-	if (DATARMNET835a28686c) {
-		DATARMNET54338da2ff = DATARMNET3cc114dce0->private_data;
-		if (refcount_read(&DATARMNET54338da2ff->refcnt) <=
-		    (0xd26 + 209 - 0xdf6)) {
-			free_page((unsigned long)DATARMNET54338da2ff->data);
-			kfree(DATARMNET54338da2ff);
-			DATARMNET835a28686c = NULL;
-			DATARMNET3cc114dce0->private_data = NULL;
-		} else {
-			refcount_dec(&DATARMNET54338da2ff->refcnt);
-		}
-	}
-	DATARMNETaea4c85748();
+	rmnet_shs_release_buffer(DATARMNET3cc114dce0, &DATARMNET835a28686c);
 	return (0xd2d + 202 - 0xdf7);
 }
 static int DATARMNET18464ea5e3(struct inode *inode,
 			       struct file *DATARMNET3cc114dce0)
 {
-	struct DATARMNETa41d4c4a12 *DATARMNET54338da2ff;
 	rm_err("\x25\x73",
 	       "\x53\x48\x53\x5f\x4d\x45\x4d\x3a\x20\x72\x6d\x6e\x65\x74\x5f\x73\x68\x73\x5f\x72\x65\x6c\x65\x61\x73\x65\x20\x6e\x65\x74\x64\x65\x76\x20\x2d\x20\x65\x6e\x74\x72\x79"
 	       "\n");
-	DATARMNET6bf538fa23();
-	if (DATARMNET67d31dc40a) {
-		DATARMNET54338da2ff = DATARMNET3cc114dce0->private_data;
-		if (refcount_read(&DATARMNET54338da2ff->refcnt) <=
-		    (0xd26 + 209 - 0xdf6)) {
-			free_page((unsigned long)DATARMNET54338da2ff->data);
-			kfree(DATARMNET54338da2ff);
-			DATARMNET67d31dc40a = NULL;
-			DATARMNET3cc114dce0->private_data = NULL;
-		} else {
-			refcount_dec(&DATARMNET54338da2ff->refcnt);
-		}
-	}
-	DATARMNETaea4c85748();
+	rmnet_shs_release_buffer(DATARMNET3cc114dce0, &DATARMNET67d31dc40a);
 	return (0xd2d + 202 - 0xdf7);
 }
 static const struct proc_ops DATARMNET668485bd14 = {
-	.proc_mmap = DATARMNET54418f934d,
+	.proc_mmap = rmnet_shs_proc_mmap,
 	.proc_open = DATARMNET33a80d3bf7,
 	.proc_release = DATARMNETcfbc4f0c39,
 	.proc_read = DATARMNETaf2aa1d70f,
 	.proc_write = DATARMNET4761dcd3fd,
 };
 static const struct proc_ops DATARMNETe84fbaa6af = {
-	.proc_mmap = DATARMNETc55748448d,
+	.proc_mmap = rmnet_shs_proc_mmap,
 	.proc_open = DATARMNET0935e3beb9,
 	.proc_release = DATARMNET2a9f67714f,
 	.proc_read = DATARMNETaf2aa1d70f,
 	.proc_write = DATARMNET4761dcd3fd,
 };
 static const struct proc_ops DATARMNET8fe5f892a8 = {
-	.proc_mmap = DATARMNET43c6d751a2,
+	.proc_mmap = rmnet_shs_proc_mmap,
 	.proc_open = DATARMNETfbd34e70a2,
 	.proc_release = DATARMNET968bc5b80d,
 	.proc_read = DATARMNETaf2aa1d70f,
 	.proc_write = DATARMNET4761dcd3fd,
 };
 static const struct proc_ops DATARMNET0104d40d4b = {
-	.proc_mmap = DATARMNET7cc042bdf3,
+	.proc_mmap = rmnet_shs_proc_mmap,
 	.proc_open = DATARMNET57bcb932f3,
 	.proc_release = DATARMNET59b415aded,
 	.proc_read = DATARMNETaf2aa1d70f,
 	.proc_write = DATARMNET4761dcd3fd,
 };
 static const struct proc_ops DATARMNETddcdf7bd4e = {
-	.proc_mmap = DATARMNET150e284e90,
+	.proc_mmap = rmnet_shs_proc_mmap,
 	.proc_open = DATARMNET601894f27b,
 	.proc_release = DATARMNET794d7587bd,
 	.proc_read = DATARMNETaf2aa1d70f,
 	.proc_write = DATARMNET4761dcd3fd,
 };
 static const struct proc_ops DATARMNET6eb63d9ad0 = {
-	.proc_mmap = DATARMNET444e2eb654,
+	.proc_mmap = rmnet_shs_proc_mmap,
 	.proc_open = DATARMNETb9d10d8cc0,
 	.proc_release = DATARMNET18464ea5e3,
 	.proc_read = DATARMNETaf2aa1d70f,
@@ -1397,6 +1274,17 @@ void DATARMNETf5f83b943f(void)
 	if (uid_valid(DATARMNETdaca088404) && gid_valid(DATARMNET254aa091f2))
 		proc_set_user(DATARMNETe4c5563cdb, DATARMNETdaca088404,
 			      DATARMNET254aa091f2);
+
+	/* Initialize buffers before users can open the proc entries. */
+	DATARMNET6bf538fa23();
+	DATARMNET410036d5ac = NULL;
+	DATARMNET19c47a9f3a = NULL;
+	DATARMNET22e796eff3 = NULL;
+	DATARMNET9b8000d2a7 = NULL;
+	DATARMNET835a28686c = NULL;
+	DATARMNET67d31dc40a = NULL;
+	DATARMNETaea4c85748();
+
 	proc_create(DATARMNET41be983a65, (0xdb7 + 6665 - 0x261c),
 		    DATARMNETe4c5563cdb, &DATARMNET668485bd14);
 	proc_create(DATARMNET5ddc91451c, (0xdb7 + 6665 - 0x261c),
@@ -1409,14 +1297,6 @@ void DATARMNETf5f83b943f(void)
 		    DATARMNETe4c5563cdb, &DATARMNETddcdf7bd4e);
 	proc_create(DATARMNETe98d39b779, (0xdb7 + 6665 - 0x261c),
 		    DATARMNETe4c5563cdb, &DATARMNET6eb63d9ad0);
-	DATARMNET6bf538fa23();
-	DATARMNET410036d5ac = NULL;
-	DATARMNET19c47a9f3a = NULL;
-	DATARMNET22e796eff3 = NULL;
-	DATARMNET9b8000d2a7 = NULL;
-	DATARMNET835a28686c = NULL;
-	DATARMNET67d31dc40a = NULL;
-	DATARMNETaea4c85748();
 }
 void DATARMNET28d33bd09f(void)
 {

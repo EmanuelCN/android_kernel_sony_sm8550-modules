@@ -721,7 +721,6 @@ static int __hdd_soc_probe(struct device *dev,
 	probe_fail_cnt = 0;
 	cds_set_driver_loaded(true);
 	cds_set_load_in_progress(false);
-	hdd_start_complete(0);
 	hdd_thermal_mitigation_register(hdd_ctx, dev);
 
 	hdd_soc_load_unlock(dev);
@@ -773,7 +772,7 @@ static int hdd_soc_probe(struct device *dev,
 
 	errno = osif_psoc_sync_create_and_trans(&psoc_sync);
 	if (errno)
-		return errno;
+		goto complete;
 
 	osif_psoc_sync_register(dev, psoc_sync);
 	errno = __hdd_soc_probe(dev, bdev, bid, bus_type);
@@ -781,8 +780,7 @@ static int hdd_soc_probe(struct device *dev,
 		goto destroy_sync;
 
 	osif_psoc_sync_trans_stop(psoc_sync);
-
-	return 0;
+	goto complete;
 
 destroy_sync:
 	osif_psoc_sync_unregister(dev);
@@ -790,6 +788,10 @@ destroy_sync:
 
 	osif_psoc_sync_trans_stop(psoc_sync);
 	osif_psoc_sync_destroy(psoc_sync);
+
+complete:
+	if (errno != -EPROBE_DEFER && !cds_is_fw_down())
+		hdd_start_complete(errno);
 
 	return errno;
 }
@@ -854,7 +856,6 @@ assert_fail_count:
 unlock:
 	cds_set_driver_in_bad_state(true);
 	hdd_soc_load_unlock(dev);
-	hdd_start_complete(errno);
 
 	return check_for_probe_defer(errno);
 }
@@ -894,13 +895,14 @@ static int hdd_soc_recovery_reinit(struct device *dev,
 	errno = osif_psoc_sync_trans_resume(dev, &psoc_sync);
 	QDF_BUG(!errno);
 	if (errno)
-		return errno;
+		goto complete;
 
 	errno = __hdd_soc_recovery_reinit(dev, bdev, bid, bus_type);
-
-
 	osif_psoc_sync_trans_stop(psoc_sync);
-	hdd_start_complete(0);
+
+complete:
+	if (!cds_is_fw_down())
+		hdd_start_complete(errno);
 
 	return errno;
 }

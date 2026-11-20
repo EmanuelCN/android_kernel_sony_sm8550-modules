@@ -284,10 +284,30 @@
 #define TSO_FEATURE_FLAGS 0
 #endif
 
-int wlan_start_ret_val;
+static int wlan_start_ret_val;
 static DECLARE_COMPLETION(wlan_start_comp);
-static qdf_atomic_t wlan_hdd_state_fops_ref;
-static bool hdd_loaded = false;
+
+/* Probe and recovery callbacks can complete while this lock is held. */
+static DEFINE_MUTEX(hdd_state_lock);
+static bool hdd_initialized;
+
+static int __hdd_driver_load(void);
+static void __hdd_driver_unload(void);
+
+#if defined(MODULE) && defined(WLAN_CTRL_NAME) && !defined(FEATURE_WLAN_RESIDENT_DRIVER)
+#define WLAN_CTRL_DEFER_LOAD 1
+#else
+#define WLAN_CTRL_DEFER_LOAD 0
+#endif
+
+#ifdef FEATURE_CNSS_HW_SECURE_DISABLE
+static bool g_soft_unload;
+
+bool hdd_get_wlan_driver_status(void)
+{
+	return g_soft_unload;
+}
+#endif
 #ifndef MODULE
 static struct gwlan_loader *wlan_loader;
 static ssize_t wlan_boot_cb(struct kobject *kobj,
@@ -517,7 +537,7 @@ QDF_STATUS hdd_common_roam_callback(struct wlan_objmgr_psoc *psoc,
 
 void hdd_start_complete(int ret)
 {
-	wlan_start_ret_val = ret;
+	WRITE_ONCE(wlan_start_ret_val, ret);
 	complete_all(&wlan_start_comp);
 }
 
@@ -15901,11 +15921,6 @@ memdump_deinit:
 	osif_request_manager_deinit();
 	qdf_nbuf_deinit_replenish_timer();
 
-	if (cds_is_fw_down())
-		hdd_err("Not setting the complete event as fw is down");
-	else
-		hdd_start_complete(errno);
-
 	hdd_exit();
 
 	return errno;
@@ -16930,7 +16945,7 @@ void hdd_init_start_completion(void)
 
 #ifdef WLAN_CTRL_NAME
 static unsigned int dev_num = 1;
-static struct cdev wlan_hdd_state_cdev;
+static struct cdev *wlan_hdd_state_cdev;
 static struct class *class;
 static dev_t device;
 
@@ -16975,14 +16990,6 @@ static void hdd_set_adapter_wlm_def_level(struct hdd_context *hdd_ctx)
 	}
 }
 
-static int wlan_hdd_state_ctrl_param_open(struct inode *inode,
-					  struct file *file)
-{
-	qdf_atomic_inc(&wlan_hdd_state_fops_ref);
-
-	return 0;
-}
-
 static void __hdd_inform_wifi_off(void)
 {
 	struct hdd_context *hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
@@ -16994,8 +17001,6 @@ static void __hdd_inform_wifi_off(void)
 
 	ucfg_dlm_wifi_off(hdd_ctx->pdev);
 }
-
-int hdd_driver_load(void);
 
 static void hdd_inform_wifi_off(void)
 {
@@ -17075,29 +17080,24 @@ static int hdd_validate_wlan_string(const char __user *user_buf)
 #ifdef FEATURE_CNSS_HW_SECURE_DISABLE
 #define WIFI_DISABLE_SLEEP (10)
 #define WIFI_DISABLE_MAX_RETRY_ATTEMPTS (10)
-static bool g_soft_unload;
-
-bool hdd_get_wlan_driver_status(void)
-{
-	return g_soft_unload;
-}
 
 static int hdd_wlan_soft_driver_load(void)
 {
+	int ret;
+
+	if (g_soft_unload) {
+		ret = __hdd_driver_load();
+		if (!ret)
+			g_soft_unload = false;
+		return ret;
+	}
+
 	if (!cds_is_driver_loaded()) {
-		hdd_debug("\nEnabling CNSS WLAN HW");
-		pld_wlan_hw_enable();
-		return 0;
+		hdd_debug("Enabling CNSS WLAN HW");
+		return pld_wlan_hw_enable();
 	}
 
-	if (!g_soft_unload) {
-		hdd_debug_rl("Enabling WiFi\n");
-		return -EINVAL;
-	}
-
-	hdd_driver_load();
-	g_soft_unload = false;
-	return 0;
+	return -EALREADY;
 }
 
 static void hdd_wlan_soft_driver_unload(void)
@@ -17108,7 +17108,7 @@ static void hdd_wlan_soft_driver_unload(void)
 	}
 	hdd_debug("Initiating soft driver unload\n");
 	g_soft_unload = true;
-	hdd_driver_unload();
+	__hdd_driver_unload();
 }
 
 static int hdd_wlan_idle_shutdown(struct hdd_context *hdd_ctx)
@@ -17183,7 +17183,7 @@ static int hdd_disable_wifi(struct hdd_context *hdd_ctx)
 #else
 static int hdd_wlan_soft_driver_load(void)
 {
-	return -EINVAL;
+	return -EALREADY;
 }
 
 static void hdd_wlan_soft_driver_unload(void)
@@ -17196,37 +17196,59 @@ static int hdd_disable_wifi(struct hdd_context *hdd_ctx)
 }
 #endif /* FEATURE_CNSS_HW_SECURE_DISABLE */
 
-static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
-						const char __user *user_buf,
-						size_t count,
-						loff_t *f_pos)
+static int hdd_wait_for_ready(void)
 {
-	int id, ret;
-	unsigned long rc;
+	int ret;
+
+	if (!wait_for_completion_timeout(&wlan_start_comp,
+			msecs_to_jiffies(HDD_WLAN_START_WAIT_TIME))) {
+		hdd_err("Driver loading timed out");
+		return -ETIMEDOUT;
+	}
+
+	ret = READ_ONCE(wlan_start_ret_val);
+	if (ret)
+		return ret;
+
+	if (!cds_is_driver_loaded() || cds_is_driver_recovering())
+		return -EAGAIN;
+
+	return 0;
+}
+
+static ssize_t hdd_handle_wlan_state(int id, size_t count)
+{
 	struct hdd_context *hdd_ctx;
-	bool is_wait_for_ready = false;
-	bool is_wlan_force_disabled;
+	int ret;
 
-	hdd_enter();
-
-	id = hdd_validate_wlan_string(user_buf);
+	if (WLAN_CTRL_DEFER_LOAD && !hdd_initialized &&
+	    !hdd_get_wlan_driver_status() &&
+	    (id == WLAN_ON_STR || id == WLAN_WAIT_FOR_READY_STR ||
+	     id == WLAN_ENABLE_STR)) {
+		ret = __hdd_driver_load();
+		if (ret)
+			return ret;
+	}
 
 	switch (id) {
 	case WLAN_OFF_STR:
 		hdd_info("Wifi turning off from UI\n");
-		hdd_inform_wifi_off();
+		if (hdd_initialized && cds_is_driver_loaded())
+			hdd_inform_wifi_off();
 		goto exit;
 	case WLAN_ON_STR:
 		hdd_info("Wifi Turning On from UI\n");
 		break;
 	case WLAN_WAIT_FOR_READY_STR:
-		is_wait_for_ready = true;
 		hdd_info("Wifi wait for ready from UI\n");
 		break;
 	case WLAN_ENABLE_STR:
 		hdd_nofl_debug("Received WiFi enable from framework\n");
-		if (!hdd_wlan_soft_driver_load())
+		ret = hdd_wlan_soft_driver_load();
+		if (!ret)
 			goto exit;
+		if (ret != -EALREADY)
+			return ret;
 		pr_info("Enabling WiFi\n");
 		break;
 	case WLAN_DISABLE_STR:
@@ -17234,8 +17256,7 @@ static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
 		if (!cds_is_driver_loaded())
 			goto exit;
 
-		is_wlan_force_disabled = hdd_get_wlan_driver_status();
-		if (is_wlan_force_disabled)
+		if (hdd_get_wlan_driver_status())
 			goto exit;
 		pr_info("Disabling WiFi\n");
 		break;
@@ -17251,28 +17272,14 @@ static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
 		return -EINVAL;
 	}
 
-	hdd_info("is_driver_loaded %d is_driver_recovering %d",
-		 cds_is_driver_loaded(), cds_is_driver_recovering());
+	if (hdd_get_wlan_driver_status())
+		return -ERFKILL;
 
+	ret = hdd_wait_for_ready();
+	if (ret)
+		return ret;
 
-	if (!hdd_loaded) {
-		if (hdd_driver_load()) {
-			pr_err("%s: Failed to init hdd module\n", __func__);
-			goto exit;
-		}
-	}
-
-	if (!cds_is_driver_loaded() || cds_is_driver_recovering()) {
-		rc = wait_for_completion_timeout(&wlan_start_comp,
-				msecs_to_jiffies(HDD_WLAN_START_WAIT_TIME));
-		if (!rc) {
-			hdd_err("Driver Loading Timed-out!!");
-			ret = -EINVAL;
-			return ret;
-		}
-	}
-
-	if (is_wait_for_ready)
+	if (id == WLAN_WAIT_FOR_READY_STR)
 		return count;
 	/*
 	 * Flush idle shutdown work for cases to synchronize the wifi on
@@ -17313,32 +17320,37 @@ exit:
 	return count;
 }
 
-/**
- * wlan_hdd_state_ctrl_param_release() -  Release callback for /dev/wlan.
- *
- * @inode: struct inode pinter.
- * @file: struct file pointer.
- *
- * Release callback that would be invoked when the file operations has
- * completed fully. This is implemented to provide a reference count mechanism
- * via which the driver can wait till all possible usage of the /dev/wlan
- * file is completed.
- *
- * Return: Success
- */
-static int wlan_hdd_state_ctrl_param_release(struct inode *inode,
-					     struct file *file)
+static int wlan_hdd_state_ctrl_param_open(struct inode *inode, struct file *file)
 {
-	qdf_atomic_dec(&wlan_hdd_state_fops_ref);
-
+	file->private_data = inode->i_cdev;
 	return 0;
 }
 
-const struct file_operations wlan_hdd_state_fops = {
+static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
+					       const char __user *user_buf,
+					       size_t count, loff_t *f_pos)
+{
+	ssize_t ret;
+	int id;
+
+	id = hdd_validate_wlan_string(user_buf);
+	if (id < 0)
+		return id;
+
+	mutex_lock(&hdd_state_lock);
+	if (filp->private_data == wlan_hdd_state_cdev)
+		ret = hdd_handle_wlan_state(id, count);
+	else
+		ret = -ENODEV;
+	mutex_unlock(&hdd_state_lock);
+
+	return ret;
+}
+
+static const struct file_operations wlan_hdd_state_fops = {
 	.owner = THIS_MODULE,
 	.open = wlan_hdd_state_ctrl_param_open,
 	.write = wlan_hdd_state_ctrl_param_write,
-	.release = wlan_hdd_state_ctrl_param_release,
 };
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0))
@@ -17359,9 +17371,6 @@ static int  wlan_hdd_state_ctrl_param_create(void)
 	int ret;
 	struct device *dev;
 
-	init_completion(&wlan_start_comp);
-	qdf_atomic_init(&wlan_hdd_state_fops_ref);
-
 	device = MKDEV(wlan_hdd_state_major, 0);
 
 	ret = alloc_chrdev_region(&device, 0, dev_num, "qcwlanstate");
@@ -17372,24 +17381,30 @@ static int  wlan_hdd_state_ctrl_param_create(void)
 	wlan_hdd_state_major = MAJOR(device);
 	class = wlan_hdd_class_create(WLAN_CTRL_NAME);
 	if (IS_ERR(class)) {
+		ret = PTR_ERR(class);
 		pr_err("wlan_hdd_state class_create error");
 		goto class_err;
 	}
 
-	dev = device_create(class, NULL, device, NULL, WLAN_CTRL_NAME);
-	if (IS_ERR(dev)) {
-		pr_err("wlan_hdd_statedevice_create error");
+	wlan_hdd_state_cdev = cdev_alloc();
+	if (!wlan_hdd_state_cdev) {
+		ret = -ENOMEM;
 		goto err_class_destroy;
 	}
+	wlan_hdd_state_cdev->ops = &wlan_hdd_state_fops;
+	wlan_hdd_state_cdev->owner = THIS_MODULE;
 
-	cdev_init(&wlan_hdd_state_cdev, &wlan_hdd_state_fops);
-
-	wlan_hdd_state_cdev.owner = THIS_MODULE;
-
-	ret = cdev_add(&wlan_hdd_state_cdev, device, dev_num);
+	ret = cdev_add(wlan_hdd_state_cdev, device, dev_num);
 	if (ret) {
 		pr_err("Failed to add cdev error");
-		goto cdev_add_err;
+		goto err_cdev_put;
+	}
+
+	dev = device_create(class, NULL, device, NULL, WLAN_CTRL_NAME);
+	if (IS_ERR(dev)) {
+		ret = PTR_ERR(dev);
+		pr_err("wlan_hdd_statedevice_create error");
+		goto err_cdev_del;
 	}
 
 	pr_info("wlan_hdd_state %s major(%d) initialized",
@@ -17397,14 +17412,18 @@ static int  wlan_hdd_state_ctrl_param_create(void)
 
 	return 0;
 
-cdev_add_err:
-	device_destroy(class, device);
+err_cdev_del:
+	cdev_del(wlan_hdd_state_cdev);
+	goto err_class_destroy;
+err_cdev_put:
+	kobject_put(&wlan_hdd_state_cdev->kobj);
 err_class_destroy:
+	wlan_hdd_state_cdev = NULL;
 	class_destroy(class);
 class_err:
 	unregister_chrdev_region(device, dev_num);
 dev_alloc_err:
-	return -ENODEV;
+	return ret;
 }
 
 /*
@@ -17429,7 +17448,11 @@ dev_alloc_err:
 
 static void wlan_hdd_state_ctrl_param_destroy(void)
 {
-	cdev_del(&wlan_hdd_state_cdev);
+	if (!wlan_hdd_state_cdev)
+		return;
+
+	cdev_del(wlan_hdd_state_cdev);
+	wlan_hdd_state_cdev = NULL;
 	device_destroy(class, device);
 	class_destroy(class);
 	unregister_chrdev_region(device, dev_num);
@@ -18326,6 +18349,7 @@ static int hdd_register_driver_retry(void)
 	int errno;
 
 	while (true) {
+		hdd_init_start_completion();
 		errno = wlan_hdd_register_driver();
 		if (errno != -EAGAIN)
 			return errno;
@@ -18351,12 +18375,11 @@ static void hdd_create_wifi_feature_interface(void)
 	hdd_create_wifi_feature_interface_sysfs_file();
 }
 
-int hdd_driver_load(void)
+static int __hdd_driver_load(void)
 {
 	struct osif_driver_sync *driver_sync;
 	QDF_STATUS status;
 	int errno;
-	bool soft_load;
 
 	pr_err("%s: Loading driver v%s\n", WLAN_MODULE_NAME,
 	       g_wlan_driver_version);
@@ -18429,20 +18452,9 @@ int hdd_driver_load(void)
 		goto pld_deinit;
 	}
 
-	/* If a soft unload of driver is done, we don't call
-	 * wlan_hdd_state_ctrl_param_destroy() to maintain sync
-	 * with userspace. In Symmetry, during soft load, avoid
-	 * calling wlan_hdd_state_ctrl_param_create().
-	 */
-	soft_load = hdd_get_wlan_driver_status();
-	if (soft_load)
-		goto out;
-
-	WRITE_ONCE(hdd_loaded, true);
-	smp_wmb();
-
 	hdd_create_wifi_feature_interface();
-out:
+	hdd_initialized = true;
+
 	hdd_debug("%s: driver loaded", WLAN_MODULE_NAME);
 	hdd_place_marker(NULL, "DRIVER LOADED", NULL);
 
@@ -18458,10 +18470,6 @@ pld_deinit:
 	hdd_driver_mode_change_unregister();
 	pld_deinit();
 
-	hdd_start_complete(errno);
-	/* Wait for any ref taken on /dev/wlan to be released */
-	while (qdf_atomic_read(&wlan_hdd_state_fops_ref))
-		;
 wakelock_destroy:
 	qdf_wake_lock_destroy(&wlan_wake_lock);
 comp_deinit:
@@ -18481,6 +18489,29 @@ exit:
 	return errno;
 }
 
+int hdd_driver_load(void)
+{
+	int ret;
+
+	mutex_lock(&hdd_state_lock);
+	if (hdd_initialized) {
+		ret = -EALREADY;
+		goto unlock;
+	}
+
+	ret = __hdd_driver_load();
+	if (ret)
+		goto unlock;
+
+	ret = wlan_hdd_state_ctrl_param_create();
+	if (ret)
+		__hdd_driver_unload();
+
+unlock:
+	mutex_unlock(&hdd_state_lock);
+	return ret;
+}
+
 #ifdef FEATURE_WLAN_RESIDENT_DRIVER
 EXPORT_SYMBOL(hdd_driver_load);
 #endif
@@ -18496,7 +18527,7 @@ static void hdd_distroy_wifi_feature_interface(void)
 	hdd_sysfs_destroy_wifi_root_obj();
 }
 
-void hdd_driver_unload(void)
+static void __hdd_driver_unload(void)
 {
 	struct osif_driver_sync *driver_sync;
 	struct hdd_context *hdd_ctx;
@@ -18559,8 +18590,6 @@ void hdd_driver_unload(void)
 	osif_driver_sync_trans_stop(driver_sync);
 
 	hdd_distroy_wifi_feature_interface();
-	if (!soft_unload)
-		wlan_hdd_state_ctrl_param_destroy();
 
 	/* trigger SoC remove */
 	wlan_hdd_unregister_driver();
@@ -18590,7 +18619,20 @@ void hdd_driver_unload(void)
 	osif_sync_deinit();
 
 	hdd_qdf_deinit();
+	hdd_initialized = false;
 	hdd_place_marker(NULL, "UNLOAD DONE", NULL);
+}
+
+void hdd_driver_unload(void)
+{
+	mutex_lock(&hdd_state_lock);
+	wlan_hdd_state_ctrl_param_destroy();
+	if (hdd_initialized)
+		__hdd_driver_unload();
+#ifdef FEATURE_CNSS_HW_SECURE_DISABLE
+	g_soft_unload = false;
+#endif
+	mutex_unlock(&hdd_state_lock);
 }
 
 #ifdef FEATURE_WLAN_RESIDENT_DRIVER
@@ -18741,9 +18783,12 @@ static int hdd_module_init(void)
 {
 	int ret;
 
+	if (!WLAN_CTRL_DEFER_LOAD)
+		return hdd_driver_load();
+
+	mutex_lock(&hdd_state_lock);
 	ret = wlan_hdd_state_ctrl_param_create();
-	if (ret)
-		pr_err("wlan_hdd_state_create:%x\n", ret);
+	mutex_unlock(&hdd_state_lock);
 
 	return ret;
 }

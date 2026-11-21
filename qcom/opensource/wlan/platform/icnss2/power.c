@@ -1076,8 +1076,8 @@ int icnss_get_psf_info(struct icnss_priv *priv)
 {
 	int ret = 0;
 
-	priv->soc_update_wq = alloc_workqueue("icnss_soc_update",
-					      WQ_UNBOUND, 1);
+	priv->soc_update_wq = alloc_ordered_workqueue("icnss_soc_update",
+					      0);
 	if (!priv->soc_update_wq) {
 		icnss_pr_err("Workqueue creation failed for soc update\n");
 		ret = -EFAULT;

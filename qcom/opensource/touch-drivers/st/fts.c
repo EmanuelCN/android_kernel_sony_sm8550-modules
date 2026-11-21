@@ -5651,8 +5651,8 @@ static int fts_probe_internal(struct i2c_client *client,
 	}
 
 	logError(0, "%s SET Auto Fw Update:\n", tag);
-	info->fwu_workqueue = alloc_workqueue("fts-fwu-queue",
-				WQ_UNBOUND|WQ_HIGHPRI|WQ_CPU_INTENSIVE, 1);
+	info->fwu_workqueue = alloc_ordered_workqueue("fts-fwu-queue",
+				WQ_HIGHPRI | WQ_CPU_INTENSIVE);
 	if (!info->fwu_workqueue) {
 		logError(1, "%s ERROR: Cannot create fwu work thread\n", tag);
 		goto ProbeErrorExit_1;
@@ -5664,8 +5664,8 @@ static int fts_probe_internal(struct i2c_client *client,
 	info->wakeup_source = wakeup_source_register(&client->dev,
 			dev_name(&client->dev));
 
-	info->event_wq = alloc_workqueue("fts-event-queue",
-				WQ_UNBOUND|WQ_HIGHPRI|WQ_CPU_INTENSIVE, 1);
+	info->event_wq = alloc_ordered_workqueue("fts-event-queue",
+				WQ_HIGHPRI | WQ_CPU_INTENSIVE);
 	if (!info->event_wq) {
 		logError(1, "%s ERROR: Cannot create work thread\n", tag);
 		error = -ENOMEM;

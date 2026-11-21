@@ -99,8 +99,8 @@ int ipa3_rmnet_ctl_init(void)
 		return -ENOMEM;
 
 	snprintf(buff, IPA_RESOURCE_NAME_MAX, "rmnet_ctlwq");
-	rmnet_ctl_ipa3_ctx->wq = alloc_workqueue(buff,
-		WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS, 1);
+	rmnet_ctl_ipa3_ctx->wq = alloc_ordered_workqueue("%s",
+		WQ_MEM_RECLAIM | WQ_SYSFS, buff);
 	if (!rmnet_ctl_ipa3_ctx->wq) {
 		kfree(rmnet_ctl_ipa3_ctx);
 		rmnet_ctl_ipa3_ctx = NULL;

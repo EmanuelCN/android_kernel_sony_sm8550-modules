@@ -1528,8 +1528,8 @@ int ipa3_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 		ep->sys->ep = ep;
 		snprintf(buff, IPA_RESOURCE_NAME_MAX, "ipawq%d",
 				sys_in->client);
-		ep->sys->wq = alloc_workqueue(buff,
-				WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS, 1);
+		ep->sys->wq = alloc_ordered_workqueue("%s",
+				WQ_MEM_RECLAIM | WQ_SYSFS, buff);
 
 		if (!ep->sys->wq) {
 			IPAERR("failed to create wq for client %d\n",
@@ -1540,9 +1540,8 @@ int ipa3_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 
 		snprintf(buff, IPA_RESOURCE_NAME_MAX, "iparepwq%d",
 				sys_in->client);
-		ep->sys->repl_wq = alloc_workqueue(buff,
-				WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS | WQ_HIGHPRI,
-				1);
+		ep->sys->repl_wq = alloc_ordered_workqueue("%s",
+				WQ_MEM_RECLAIM | WQ_SYSFS | WQ_HIGHPRI, buff);
 		if (!ep->sys->repl_wq) {
 			IPAERR("failed to create rep wq for client %d\n",
 					sys_in->client);
@@ -1553,8 +1552,8 @@ int ipa3_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 		snprintf(buff, IPA_RESOURCE_NAME_MAX, "ipataskletwq%d",
 				sys_in->client);
 
-		ep->sys->tasklet_wq = alloc_workqueue(buff,
-				WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS, 1);
+		ep->sys->tasklet_wq = alloc_ordered_workqueue("%s",
+				WQ_MEM_RECLAIM | WQ_SYSFS, buff);
 		if (!ep->sys->tasklet_wq) {
 			IPAERR("failed to create rep wq for client %d\n",
 					sys_in->client);
@@ -1586,9 +1585,8 @@ int ipa3_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 			/* Use coalescing pipe PM handle for default pipe also*/
 			ep->sys->pm_hdl = ipa3_ctx->ep[lan_coal_ep_id].sys->pm_hdl;
 		} else if (IPA_CLIENT_IS_CONS(sys_in->client)) {
-			ep->sys->freepage_wq = alloc_workqueue(buff,
-					WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS |
-					WQ_HIGHPRI, 1);
+			ep->sys->freepage_wq = alloc_ordered_workqueue("%s",
+					WQ_MEM_RECLAIM | WQ_SYSFS | WQ_HIGHPRI, buff);
 			if (!ep->sys->freepage_wq) {
 				IPAERR("failed to create freepage wq for client %d\n",
 						sys_in->client);

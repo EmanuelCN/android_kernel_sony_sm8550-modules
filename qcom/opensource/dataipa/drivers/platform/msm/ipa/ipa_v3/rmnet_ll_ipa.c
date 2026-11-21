@@ -253,8 +253,8 @@ int ipa3_rmnet_ll_init(void)
 		return -ENOMEM;
 
 	snprintf(buff, IPA_RESOURCE_NAME_MAX, "rmnet_llwq");
-	rmnet_ll_ipa3_ctx->wq = alloc_workqueue(buff,
-		WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS, 1);
+	rmnet_ll_ipa3_ctx->wq = alloc_ordered_workqueue("%s",
+		WQ_MEM_RECLAIM | WQ_SYSFS, buff);
 	if (!rmnet_ll_ipa3_ctx->wq) {
 		kfree(rmnet_ll_ipa3_ctx);
 		rmnet_ll_ipa3_ctx = NULL;

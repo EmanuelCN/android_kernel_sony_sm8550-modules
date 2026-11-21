@@ -137,8 +137,8 @@ static int ipa_eth_init_internal(void)
 	}
 
 	snprintf(buff, IPA_RESOURCE_NAME_MAX, "ipa_eth_wq");
-	ipa_eth_ctx->wq = alloc_workqueue(buff,
-		WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS, 1);
+	ipa_eth_ctx->wq = alloc_ordered_workqueue("%s",
+		WQ_MEM_RECLAIM | WQ_SYSFS, buff);
 	if (!ipa_eth_ctx->wq) {
 		goto wq_err;
 	}

@@ -1156,8 +1156,8 @@ int ipa3_uc_interface_init(void)
 		}
 
 		if (ipa3_ctx->uc_ctx.ipa_use_uc_holb_monitor) {
-			ipa_uc_holb_wq = alloc_workqueue(IPA_UC_HOLB_WORKQUEUE_NAME,
-					WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_SYSFS, 1);
+			ipa_uc_holb_wq = alloc_ordered_workqueue(IPA_UC_HOLB_WORKQUEUE_NAME,
+					WQ_MEM_RECLAIM | WQ_SYSFS);
 
 			if (!ipa_uc_holb_wq) {
 				IPAERR("Failed to create ipa_uc_holb_wq\n");

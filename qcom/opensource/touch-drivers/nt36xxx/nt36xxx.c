@@ -1415,7 +1415,7 @@ static int32_t nvt_ts_late_probe(struct i2c_client *client,
 #endif
 
 #if BOOT_UPDATE_FIRMWARE
-	nvt_fwu_wq = alloc_workqueue("nvt_fwu_wq", WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
+	nvt_fwu_wq = alloc_ordered_workqueue("nvt_fwu_wq", WQ_MEM_RECLAIM);
 	if (!nvt_fwu_wq) {
 		NVT_ERR("nvt_fwu_wq create workqueue failed\n");
 		ret = -ENOMEM;
@@ -4055,7 +4055,7 @@ static int32_t nvt_spi_probe(struct spi_device *client)
 #endif
 
 #if NVT_SPI_BOOT_UPDATE_FIRMWARE
-	nvt_spi_fwu_wq = alloc_workqueue("nvt_spi_fwu_wq", WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
+	nvt_spi_fwu_wq = alloc_ordered_workqueue("nvt_spi_fwu_wq", WQ_MEM_RECLAIM);
 	if (!nvt_spi_fwu_wq) {
 		NVT_ERR("nvt_spi_fwu_wq create workqueue failed\n");
 		ret = -ENOMEM;

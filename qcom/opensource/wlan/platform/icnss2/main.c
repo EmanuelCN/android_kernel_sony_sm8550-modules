@@ -5156,7 +5156,7 @@ static int icnss_probe(struct platform_device *pdev)
 	mutex_init(&priv->dev_lock);
 	mutex_init(&priv->tcdev_lock);
 
-	priv->event_wq = alloc_workqueue("icnss_driver_event", WQ_UNBOUND, 1);
+	priv->event_wq = alloc_ordered_workqueue("icnss_driver_event", 0);
 	if (!priv->event_wq) {
 		icnss_pr_err("Workqueue creation failed\n");
 		ret = -EFAULT;
@@ -5193,8 +5193,8 @@ static int icnss_probe(struct platform_device *pdev)
 
 	if (priv->device_id == WCN6750_DEVICE_ID ||
 	    priv->device_id == WCN6450_DEVICE_ID) {
-		priv->soc_wake_wq = alloc_workqueue("icnss_soc_wake_event",
-						    WQ_UNBOUND|WQ_HIGHPRI, 1);
+		priv->soc_wake_wq = alloc_ordered_workqueue("icnss_soc_wake_event",
+						    WQ_HIGHPRI);
 		if (!priv->soc_wake_wq) {
 			icnss_pr_err("Soc wake Workqueue creation failed\n");
 			ret = -EFAULT;
